@@ -1,0 +1,65 @@
+spring:
+  application:
+    name: flashsale-backend
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:flashsale}
+    username: ${DB_USER:flashsale}
+    password: ${DB_PASSWORD:flashsale}
+    hikari:
+      maximum-pool-size: 30
+      minimum-idle: 5
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 20
+        order_inserts: true
+        order_updates: true
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: always
+
+flashsale:
+  order:
+    reservation-ttl-minutes: 15
+    expiry-scan-interval-ms: 60000
+  payment:
+    payuni:
+      merchant-id: ${PAYUNI_MERCHANT_ID:}
+      hash-key: ${PAYUNI_HASH_KEY:}
+      hash-iv: ${PAYUNI_HASH_IV:}
+      env: ${PAYUNI_ENV:test}
+      return-url: ${PAYUNI_RETURN_URL:http://localhost:8080/api/payments/payuni/callback}
+      notify-url: ${PAYUNI_NOTIFY_URL:http://localhost:8080/api/payments/payuni/callback}
+      frontend-result-url: ${PAYUNI_FRONTEND_RESULT_URL:http://localhost:3000/result}
+    stripe:
+      secret-key: ${STRIPE_SECRET_KEY:}
+      webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
+      currency: ${STRIPE_CURRENCY:twd}
+      success-url: ${STRIPE_SUCCESS_URL:http://localhost:3000/result}
+      cancel-url: ${STRIPE_CANCEL_URL:http://localhost:3000/result}
+    ecpay:
+      merchant-id: ${ECPAY_MERCHANT_ID:2000132}
+      hash-key:    ${ECPAY_HASH_KEY:pwFHCqoQZGmoCv08Q3XY}
+      hash-iv:     ${ECPAY_HASH_IV:EkRm7iFT760PKIKAKExC}
+      api-url:     ${ECPAY_API_URL:https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5}
+      return-url:  ${ECPAY_RETURN_URL:http://localhost:8080/api/payments/ecpay/callback}
+      order-result-url: ${ECPAY_ORDER_RESULT_URL:http://localhost:3000/result}
+      client-back-url:  ${ECPAY_CLIENT_BACK_URL:http://localhost:3000}
+
+logging:
+  level:
+    com.flashsale: INFO
+    org.hibernate.SQL: WARN

@@ -1,0 +1,19 @@
+Checking for new versions...
+
+A newer version of the Stripe CLI is available, please update to: v1.42.1
+Getting ready...
+Ready! You are using Stripe API Version [2026-05-27.dahlia]. Your webhook signing secret is whsec_013c4eca938ba16d81ad7ec18edf46caba24ff0fa27aeedbcf09e9cd7f9b6651 (^C to quit)
+2026-06-05 05:38:29   --> product.created [evt_1Teiy94byxuZPXEuH8vbw2Po]
+2026-06-05 05:38:29  <--  [200] POST http://localhost:8080/api/payments/stripe/callback [evt_1Teiy94byxuZPXEuH8vbw2Po]
+2026-06-05 05:38:29   --> price.created [evt_1Teiy94byxuZPXEuu9bS0RqJ]
+2026-06-05 05:38:29  <--  [200] POST http://localhost:8080/api/payments/stripe/callback [evt_1Teiy94byxuZPXEuu9bS0RqJ]
+2026-06-05 05:38:32   --> charge.succeeded [evt_3TeiyB4byxuZPXEu0VFEcDdR]
+2026-06-05 05:38:32  <--  [200] POST http://localhost:8080/api/payments/stripe/callback [evt_3TeiyB4byxuZPXEu0VFEcDdR]
+2026-06-05 05:38:32   --> payment_intent.succeeded [evt_3TeiyB4byxuZPXEu0PKZocwn]
+2026-06-05 05:38:32  <--  [200] POST http://localhost:8080/api/payments/stripe/callback [evt_3TeiyB4byxuZPXEu0PKZocwn]
+2026-06-05 05:38:32   --> checkout.session.completed [evt_1TeiyC4byxuZPXEuc5pmaIdc]
+2026-06-05 05:38:32   --> payment_intent.created [evt_3TeiyB4byxuZPXEu0Ge5EZwV]
+2026-06-05 05:38:33  <--  [200] POST http://localhost:8080/api/payments/stripe/callback [evt_3TeiyB4byxuZPXEu0Ge5EZwV]
+2026-06-05 05:38:33  <--  [200] POST http://localhost:8080/api/payments/stripe/callback [evt_1TeiyC4byxuZPXEuc5pmaIdc]
+2026-06-05 05:38:35   --> charge.updated [evt_3TeiyB4byxuZPXEu01jbawDD]
+2026-06-05 05:38:35  <--  [200] POST http://localhost:8080/api/payments/stripe/callback [evt_3TeiyB4byxuZPXEu01jbawDD]
