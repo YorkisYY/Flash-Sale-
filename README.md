@@ -1,4 +1,4 @@
-# Flash Sale (秒殺) System
+# Flash Sale System
 
 Single-tenant limited-drop / flash-sale system. Real buyers, guest checkout, sandbox PayUni. Built around correct behavior under concurrent stock contention + safe payment flow.
 
