@@ -28,6 +28,9 @@ frontend/.vercel
 # Loadtest
 loadtest/node_modules/
 
+# Local logs
+stripe-listen.log
+
 # Docker
 docker-compose.override.yml
 
