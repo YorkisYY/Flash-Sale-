@@ -23,13 +23,16 @@ export type PurchaseRequest = {
 };
 
 export type PurchaseResponse = {
-  orderId: number;
+  // UUID externalId — NOT the internal Long DB id. The backend's wire
+  // contract is externalId-keyed; treating this as a number broke the
+  // result page (Long.parseLong on a UUID).
+  orderId: string;
   redirectUrl: string | null;
   formHtml: string | null;
 };
 
 export type OrderInfo = {
-  id: number;
+  id: string;
   productId: number;
   quantity: number;
   buyerName: string;

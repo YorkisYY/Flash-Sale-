@@ -47,11 +47,66 @@ package com.flashsale.inventory;
 public interface InventoryService {
 
     /**
-     * Attempt to reserve {@code quantity} units of {@code productId}.
+     * Attempt to reserve {@code quantity} units of {@code productId} —
+     * full sync path: Redis Lua DECR (if Redis is active) + Postgres
+     * atomic UPDATE + Redis compensation on DB rejection.
      *
      * @return true if reservation succeeded; false if not enough stock.
      */
     boolean tryReserve(Long productId, int quantity);
+
+    /**
+     * The Redis half ONLY — no DB UPDATE. Used by the async API layer
+     * (peak shaving): if Redis admits the request, publish to Kafka and
+     * return 202 immediately; the consumer does the DB half later.
+     *
+     * Default implementation returns true (no Redis = no peak shave,
+     * pass-through). The DB UPDATE downstream still guards correctness.
+     */
+    default boolean tryReserveRedisOnly(Long productId, int quantity) {
+        return true;
+    }
+
+    /**
+     * The Postgres half ONLY — used by the Kafka consumer. The atomic
+     * UPDATE here is the final correctness guard: Redis already said yes,
+     * but Postgres has the last word.
+     *
+     * Default delegates to {@link #tryReserve} since in a DB-only
+     * deployment the "full" reservation IS just the DB UPDATE.
+     */
+    default boolean tryReserveDbOnly(Long productId, int quantity) {
+        return tryReserve(productId, quantity);
+    }
+
+    /**
+     * Compensation entry used by the consumer when its DB UPDATE rejects
+     * a reservation that Redis had previously admitted. Returns the units
+     * to the Redis counter ONLY — no DB write, because the DB never
+     * decremented in the first place.
+     *
+     * Default no-op (DB-only deployments have nothing to undo).
+     */
+    default void releaseRedisOnly(Long productId, int quantity) {}
+
+    /**
+     * Restore stock to the DB layer ONLY — used by the consumer's race-loser
+     * path. When two consumers race on the same {@code externalId} (rare
+     * rebalance overlap), both pass {@link #tryReserveDbOnly} (REQUIRES_NEW
+     * tx, committed independently). The winner's order INSERT commits; the
+     * loser's INSERT trips the {@code orders.external_id} unique constraint.
+     * The loser must undo its OWN DB decrement — but MUST NOT touch Redis,
+     * because the producer's Redis DECR was for the single logical order
+     * the winner persisted. Calling the full {@link #release} here would
+     * over-restore Redis by 1 (cosmetic drift, self-corrects via reconcile;
+     * this method is the precise fix).
+     *
+     * Default delegates to {@link #release} — in a DB-only deployment, the
+     * "full release" IS DB-only because there's no Redis layer to over-touch.
+     */
+    default void releaseDbOnly(Long productId, int quantity) {
+        release(productId, quantity);
+    }
 
     /**
      * Return previously reserved units to the available pool. Called on order
@@ -75,4 +130,13 @@ public interface InventoryService {
      * source of truth — startup is when you re-derive it).
      */
     default void reloadAll() {}
+
+    /**
+     * Periodic drift correction. Enforces the two-store invariant
+     * {@code redis["stock:" + productId] == product.available_stock} for every
+     * non-archived product. No-op in DB-only deployments; the Redis impl
+     * compares, SETs on drift, and logs each correction so divergence is
+     * observable. See "Stock consistency" in the README.
+     */
+    default void reconcile() {}
 }

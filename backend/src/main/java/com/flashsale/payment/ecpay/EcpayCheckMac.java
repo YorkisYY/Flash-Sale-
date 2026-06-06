@@ -1,5 +1,8 @@
 package com.flashsale.payment.ecpay;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -26,6 +29,8 @@ import java.util.TreeMap;
  */
 public final class EcpayCheckMac {
 
+    private static final Logger log = LoggerFactory.getLogger(EcpayCheckMac.class);
+
     private EcpayCheckMac() {}
 
     public static String compute(Map<String, String> params, String hashKey, String hashIv) {
@@ -40,6 +45,14 @@ public final class EcpayCheckMac {
         raw.append("&HashIV=").append(hashIv);
 
         String encoded = ecpayUrlEncode(raw.toString()).toLowerCase();
+        // The pre-hash string contains HashKey AND HashIV in the clear, so
+        // it must NEVER be logged above DEBUG. Production runs at INFO; this
+        // log line is a no-op there. Only enable
+        // `logging.level.com.flashsale.payment.ecpay=DEBUG` locally when
+        // debugging a CheckMacValue mismatch against the stage server.
+        if (log.isDebugEnabled()) {
+            log.debug("ECPay CheckMacValue pre-hash string: {}", encoded);
+        }
         return sha256Hex(encoded).toUpperCase();
     }
 

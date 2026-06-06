@@ -3,6 +3,7 @@ package com.flashsale.api;
 import com.flashsale.payment.PaymentResult;
 import com.flashsale.payment.PaymentResultService;
 import com.flashsale.payment.PaymentSignatureException;
+import com.flashsale.payment.StaleCallbackException;
 import com.flashsale.payment.ecpay.EcpayProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +57,14 @@ public class EcpayWebhookController {
         } catch (PaymentSignatureException bad) {
             log.warn("ECPay webhook rejected: {}", bad.getMessage());
             return ResponseEntity.badRequest().body("0|INVALID");
+        } catch (StaleCallbackException stale) {
+            // Signature verified but PaymentDate older than the replay
+            // window — most likely a captured-and-replayed legitimate
+            // webhook. Return 200 with the normal success ack so ECPay
+            // stops retrying; do NOT call applyResult. Logged at WARN so
+            // a non-zero rate becomes observable.
+            log.warn("ECPay callback rejected as replay: {}", stale.getMessage());
+            return ResponseEntity.ok(EcpayProvider.ACK_OK);
         }
 
         try {

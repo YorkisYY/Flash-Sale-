@@ -62,6 +62,9 @@ class RedisInventoryCompensationTest {
     static void wireRedis(DynamicPropertyRegistry registry) {
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", redis::getFirstMappedPort);
+        registry.add("spring.autoconfigure.exclude",
+                () -> "org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration");
+        registry.add("spring.kafka.bootstrap-servers", () -> "");
     }
 
     @Autowired InventoryService inventoryService;
@@ -166,6 +169,38 @@ class RedisInventoryCompensationTest {
         assertThat(redisStock(productId))
                 .as("Redis stock must equal initial after %d failed createOrders", attempts)
                 .isEqualTo(String.valueOf(initialStock));
+    }
+
+    /**
+     * Pins the race-loser compensation contract: {@code releaseDbOnly} must
+     * restore the DB counter without bumping Redis. Without this, the rare
+     * "two consumers process the same event" path leaves Redis over-reporting
+     * by one unit per occurrence — cosmetic drift that {@code reconcile()}
+     * would eventually catch, but better not to introduce in the first place.
+     */
+    @Test
+    void releaseDbOnlyTouchesOnlyDbNotRedis() {
+        assertThat(((RedisInventoryService) inventoryService).isRedisActive()).isTrue();
+
+        Product product = newProduct(10);
+        product = productRepository.saveAndFlush(product);
+        Long productId = product.getId();
+        inventoryService.loadProduct(productId);
+
+        // Reserve 3 via the full path so both layers move together.
+        assertThat(inventoryService.tryReserve(productId, 3)).isTrue();
+        assertThat(redisStock(productId)).isEqualTo("7");
+        assertThat(productRepository.findById(productId).orElseThrow().getAvailableStock()).isEqualTo(7);
+
+        // releaseDbOnly: DB goes back to 10, Redis MUST stay at 7.
+        inventoryService.releaseDbOnly(productId, 3);
+
+        assertThat(productRepository.findById(productId).orElseThrow().getAvailableStock())
+                .as("DB stock must be restored to the original")
+                .isEqualTo(10);
+        assertThat(redisStock(productId))
+                .as("Redis stock must NOT be touched by releaseDbOnly")
+                .isEqualTo("7");
     }
 
     @Test

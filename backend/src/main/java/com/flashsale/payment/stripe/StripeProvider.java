@@ -132,6 +132,14 @@ public class StripeProvider implements PaymentProvider {
 
         Event event;
         try {
+            // Three-arg overload: uses the SDK's default timestamp tolerance
+            // of 300 seconds. The Stripe-Signature header includes t=<unix>;
+            // constructEvent will throw SignatureVerificationException if
+            // |now - t| > 300s, which is our replay-attack defence. If we
+            // ever overloaded to the 4-arg form with tolerance=0 (or a very
+            // large value), captured legitimate webhooks could be replayed
+            // indefinitely. The default is correct — do not pass an explicit
+            // tolerance argument unless you have a specific reason.
             event = Webhook.constructEvent(rawBody, signatureHeader, props.getWebhookSecret());
         } catch (SignatureVerificationException e) {
             throw new PaymentSignatureException("Stripe webhook signature invalid", e);
@@ -148,7 +156,18 @@ public class StripeProvider implements PaymentProvider {
         // The Stripe SDK can be finicky about deserializing events whose
         // api_version doesn't match the SDK. Reading metadata.orderId from the
         // raw JSON sidesteps that entirely.
+        //
+        // Missing/blank/unparseable metadata.orderId is NOT a server error —
+        // it's a perfectly valid event we just can't act on (e.g. `stripe
+        // trigger` fixture data has no real orderId). Return PaymentResult
+        // with orderId=null and let the controller's existing "IGNORED 200"
+        // lane absorb it. That tells Stripe to stop retrying.
         Long orderId = extractOrderId(rawBody);
+        if (orderId == null) {
+            log.warn("Stripe checkout.session.completed {} has no parseable metadata.orderId — ignoring",
+                    event.getId());
+            return new PaymentResult(false, null, event.getId(), null);
+        }
         return new PaymentResult(true, orderId, event.getId(), null);
     }
 
@@ -160,18 +179,30 @@ public class StripeProvider implements PaymentProvider {
         return perUnit.longValueExact();
     }
 
+    /**
+     * Returns the orderId from {@code data.object.metadata.orderId}, or
+     * {@code null} if it's missing, blank, or non-numeric. NEVER throws —
+     * caller treats null as "valid signed event but nothing for us to do."
+     *
+     * Throwing here would surface a `stripe trigger` fixture as a 500 from
+     * the webhook controller; Stripe would then retry the event for ~3 days
+     * before giving up. Quiet null + IGNORED-200 is the right shape.
+     */
     private Long extractOrderId(String rawBody) {
         try {
             JsonNode root = objectMapper.readTree(rawBody);
             JsonNode metadata = root.path("data").path("object").path("metadata");
             String orderIdStr = metadata.path("orderId").asText(null);
             if (orderIdStr == null || orderIdStr.isBlank()) {
-                throw new IllegalStateException(
-                        "Stripe checkout.session.completed missing metadata.orderId");
+                return null;
             }
             return Long.parseLong(orderIdStr);
+        } catch (NumberFormatException e) {
+            log.warn("Stripe metadata.orderId is not a valid long: {}", e.getMessage());
+            return null;
         } catch (Exception e) {
-            throw new IllegalStateException("Cannot extract orderId from Stripe payload: " + e.getMessage(), e);
+            log.warn("Cannot parse Stripe payload to extract metadata.orderId: {}", e.toString());
+            return null;
         }
     }
 }

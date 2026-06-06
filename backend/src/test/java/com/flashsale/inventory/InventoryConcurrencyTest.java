@@ -50,10 +50,16 @@ class InventoryConcurrencyTest {
 
     @DynamicPropertySource
     static void disableRedisAutoconfig(DynamicPropertyRegistry registry) {
-        // Tests don't need Redis; exclude its starter so missing host doesn't break the context.
+        // Tests don't need Redis or Kafka; exclude both starters so missing
+        // hosts don't break the context.
         registry.add("spring.autoconfigure.exclude",
                 () -> "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration,"
-                    + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration");
+                    + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration,"
+                    + "org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration");
+        // Force the Kafka conditional in OrderEventConsumer / KafkaConfig to
+        // resolve false so they don't try to register a listener container
+        // when there's no broker.
+        registry.add("spring.kafka.bootstrap-servers", () -> "");
     }
 
     @Autowired private InventoryService inventoryService;

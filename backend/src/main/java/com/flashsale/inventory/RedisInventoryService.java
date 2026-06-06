@@ -12,9 +12,11 @@ import org.springframework.context.event.EventListener;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Redis pre-deduction throttle. Sits IN FRONT OF {@link DatabaseInventoryService},
@@ -125,45 +127,91 @@ public class RedisInventoryService implements InventoryService {
         if (quantity <= 0) {
             throw new IllegalArgumentException("quantity must be positive, got " + quantity);
         }
+        // Composes the three single-layer primitives — same behaviour as
+        // before the split, retained for the sync createOrder path.
+        if (!tryReserveRedisOnly(productId, quantity)) {
+            return false;
+        }
+        if (!tryReserveDbOnly(productId, quantity)) {
+            log.warn("Redis allowed reservation but DB rejected (product={} qty={}); refunding Redis",
+                    productId, quantity);
+            releaseRedisOnly(productId, quantity);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Redis Lua DECR ONLY — the async API path stops here and publishes to
+     * Kafka. Lazy-bootstraps from Postgres if the key is missing. Falls
+     * through to the DB layer (which {@link #tryReserveDbOnly} delegates to
+     * the dbService) when Redis itself errors — same fallback contract as
+     * the original combined method.
+     */
+    @Override
+    public boolean tryReserveRedisOnly(Long productId, int quantity) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("quantity must be positive, got " + quantity);
+        }
         if (redis == null) {
-            return dbService.tryReserve(productId, quantity);
+            // No Redis layer at all — degrade to "let DB layer handle it."
+            // Returning true here means the API publishes; if the DB then
+            // can't honor it, the consumer's compensation runs cleanly.
+            return true;
         }
 
         String key = STOCK_KEY_PREFIX + productId;
         Long result = runReserveScript(key, quantity);
 
-        // ----- Degradation path: Redis itself errored on this request -----
         if (result == null) {
-            log.warn("Redis reserve script failed for product {}; falling through to DB-only", productId);
-            return dbService.tryReserve(productId, quantity);
+            log.warn("Redis reserve script failed for product {}; degrading to pass-through", productId);
+            return true;
         }
-
-        // ----- Lazy bootstrap: key missing in Redis -----
         if (result == -1L) {
             log.info("Redis stock key missing for product {}; lazy-bootstrapping from DB", productId);
             loadProduct(productId);
             result = runReserveScript(key, quantity);
             if (result == null || result == -1L) {
-                return dbService.tryReserve(productId, quantity);
+                return true; // bootstrap failed — let DB decide
             }
         }
+        return result != 0L;
+    }
 
-        // ----- Sold out at the throttle — most requests die here, never hit DB -----
-        if (result == 0L) {
-            return false;
+    /** Postgres atomic UPDATE only — the consumer's final defense. */
+    @Override
+    public boolean tryReserveDbOnly(Long productId, int quantity) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("quantity must be positive, got " + quantity);
         }
+        return dbService.tryReserve(productId, quantity);
+    }
 
-        // ----- Redis reserved. Confirm at the DB final defense. -----
-        // If DB rejects (drift between layers — restored snapshot, missed
-        // compensation, etc.), refund Redis to re-sync.
-        boolean dbReserved = dbService.tryReserve(productId, quantity);
-        if (!dbReserved) {
-            log.warn("Redis allowed reservation but DB rejected (product={} qty={}); refunding Redis",
-                    productId, quantity);
-            tryIncrementRedis(key, quantity);
-            return false;
+    /** Redis INCR only — consumer compensation when DB rejects a Redis-allowed reservation. */
+    @Override
+    public void releaseRedisOnly(Long productId, int quantity) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("quantity must be positive, got " + quantity);
         }
-        return true;
+        if (redis != null) {
+            tryIncrementRedis(productId, quantity);
+        }
+    }
+
+    /**
+     * DB INCR only — consumer race-loser path. The race-losing consumer
+     * decremented the DB in its own REQUIRES_NEW tx, so the unique-constraint
+     * rollback can't reverse it. This method restores ONLY the DB; Redis is
+     * left alone because the producer's single DECR is accounted for by the
+     * winner's persisted order. See {@link InventoryService#releaseDbOnly}
+     * for the full rationale.
+     */
+    @Override
+    public void releaseDbOnly(Long productId, int quantity) {
+        if (quantity <= 0) {
+            throw new IllegalArgumentException("quantity must be positive, got " + quantity);
+        }
+        dbService.release(productId, quantity);
     }
 
     /**
@@ -183,7 +231,75 @@ public class RedisInventoryService implements InventoryService {
         }
         dbService.release(productId, quantity);
         if (redis != null) {
-            tryIncrementRedis(STOCK_KEY_PREFIX + productId, quantity);
+            tryIncrementRedis(productId, quantity);
+        }
+    }
+
+    /**
+     * Periodic reconciliation safety net. Enforces the two-store invariant:
+     *
+     *   redis["stock:" + productId]  ==  product.available_stock
+     *
+     * for every non-archived product. Necessary because {@link #release} does
+     * its Redis INCR on a best-effort basis — a transient {@link DataAccessException}
+     * during release is logged and swallowed so the caller doesn't fail, which
+     * means a Redis blip can leave Redis under-reporting until something
+     * pushes the truth back in.
+     *
+     * Drift sources this covers:
+     *   - {@code tryIncrementRedis} swallowed a Redis exception during release
+     *   - Redis was restarted with empty state; lazy bootstrap inside
+     *     {@link #tryReserve} only fires on the first reservation per product
+     *   - Manual DB edits or restored Postgres snapshots
+     *
+     * Wired to run every {@code flashsale.inventory.reconcile-interval-ms}
+     * (default 60s) in addition to the one-shot reload on application startup.
+     *
+     * Race note: {@code available_stock} can change between the SELECT and the
+     * Redis SET, so this method may briefly write a 1-2 unit stale value under
+     * heavy traffic — the next pass corrects it. This is a periodic safety
+     * net, not a strongly-consistent mirror.
+     *
+     * Each correction logs at ERROR with {@code productId} + old/new values
+     * so a dashboard can alert on a non-zero correction count.
+     */
+    @Override
+    @Scheduled(fixedDelayString = "${flashsale.inventory.reconcile-interval-ms:60000}")
+    public void reconcile() {
+        if (redis == null) return;
+        int total = 0;
+        int corrected = 0;
+        try {
+            for (Product p : productRepository.findAll()) {
+                if (p.getStatus() == ProductStatus.ARCHIVED) continue;
+                total++;
+                String key = STOCK_KEY_PREFIX + p.getId();
+                String expected = String.valueOf(p.getAvailableStock());
+                String actual;
+                try {
+                    actual = redis.opsForValue().get(key);
+                } catch (DataAccessException e) {
+                    log.error("Reconcile read failed for productId={}: {}", p.getId(), e.toString());
+                    continue;
+                }
+                if (!Objects.equals(expected, actual)) {
+                    try {
+                        redis.opsForValue().set(key, expected);
+                        corrected++;
+                        log.error("Reconcile corrected drift: productId={} oldRedis={} dbTruth={}",
+                                p.getId(), actual, expected);
+                    } catch (DataAccessException e) {
+                        log.error("Reconcile write failed for productId={}: {}", p.getId(), e.toString());
+                    }
+                }
+            }
+            if (corrected > 0) {
+                log.warn("Reconcile pass complete: {}/{} products required correction", corrected, total);
+            } else {
+                log.debug("Reconcile pass complete: {} products checked, no drift", total);
+            }
+        } catch (DataAccessException e) {
+            log.error("Reconcile pass aborted: {}", e.toString());
         }
     }
 
@@ -219,16 +335,15 @@ public class RedisInventoryService implements InventoryService {
         }
     }
 
-    private void tryIncrementRedis(String key, int quantity) {
+    private void tryIncrementRedis(Long productId, int quantity) {
         try {
-            redis.opsForValue().increment(key, quantity);
+            redis.opsForValue().increment(STOCK_KEY_PREFIX + productId, quantity);
         } catch (DataAccessException e) {
-            // Stock IS restored in Postgres at this point. Redis just falls
-            // behind until the next reloadAll resyncs. Don't fail the caller
-            // for a transient Redis blip — the buyer-visible cost is at worst
-            // a window of incorrect "sold out" responses; the DB value is right.
-            log.warn("Redis refund failed for {} qty {} — will reconcile on next reload: {}",
-                    key, quantity, e.toString());
+            // G1 bug-class: DB has been restored, Redis has NOT. Drift is
+            // permanent until reconcile() corrects it. Log at ERROR with
+            // productId so dashboards can alert on a non-zero rate.
+            log.error("Redis refund failed for productId={} qty={} — drift until next reconcile: {}",
+                    productId, quantity, e.toString());
         }
     }
 

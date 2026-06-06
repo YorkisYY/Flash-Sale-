@@ -72,7 +72,9 @@ class EcpayWebhookIdempotencyTest {
     static void props(DynamicPropertyRegistry registry) {
         registry.add("spring.autoconfigure.exclude",
                 () -> "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration,"
-                    + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration");
+                    + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration,"
+                    + "org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration");
+        registry.add("spring.kafka.bootstrap-servers", () -> "");
         registry.add("flashsale.payment.ecpay.merchant-id",      () -> MERCHANT_ID);
         registry.add("flashsale.payment.ecpay.hash-key",         () -> HASH_KEY);
         registry.add("flashsale.payment.ecpay.hash-iv",          () -> HASH_IV);
@@ -164,6 +166,45 @@ class EcpayWebhookIdempotencyTest {
         assertThat(untouched.getStatus()).isEqualTo(OrderStatus.CREATED);
     }
 
+    /**
+     * Replay protection: a CheckMacValue-valid callback whose PaymentDate
+     * is outside the replay window must be acked with HTTP 200 + "1|OK"
+     * (so ECPay doesn't retry-storm) but MUST NOT change order state.
+     *
+     * Returning 4xx here would invite endless retries of the same stale
+     * message; returning anything other than "1|OK" likewise. The signature
+     * is genuine, so we don't pretend it isn't — we just refuse to act on
+     * a payment "captured" 1 hour ago when we expect deliveries within ~10
+     * minutes of the actual capture.
+     */
+    @Test
+    void staleCallbackIsAckedButNotApplied() throws Exception {
+        Order order = seedOrder("ECPAY");
+        String tradeNo = "EC_STALE_TEST_01";
+        long eventsBefore = paymentEventRepository.count();
+
+        // PaymentDate one hour ago — well outside the default 600s window.
+        MultiValueMap<String, String> stale = buildSignedReturnUrlPayload(
+                order.getId(), tradeNo, taipeiMinusSeconds(3600));
+
+        mockMvc.perform(post("/api/payments/ecpay/callback")
+                        .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                        .params(stale))
+                .andExpect(status().isOk())
+                .andExpect(content().string(EcpayProvider.ACK_OK));
+
+        // The order must NOT have transitioned, and no payment_event row
+        // must have been written — the side effects are all gated behind
+        // the replay check.
+        Order untouched = orderRepository.findById(order.getId()).orElseThrow();
+        assertThat(untouched.getStatus())
+                .as("stale callback must not transition the order")
+                .isEqualTo(OrderStatus.CREATED);
+        assertThat(paymentEventRepository.count())
+                .as("stale callback must not write a payment_event row")
+                .isEqualTo(eventsBefore);
+    }
+
     @Test
     void tamperedPayloadIsRejected() throws Exception {
         Order order = seedOrder("ECPAY");
@@ -198,10 +239,18 @@ class EcpayWebhookIdempotencyTest {
     }
 
     /**
-     * Build a form payload as ECPay would send it back on a successful
-     * payment, with a CheckMacValue computed off the test HashKey/IV.
+     * Build a form payload with the current Taipei timestamp — passes the
+     * replay-window check by default.
      */
     private static MultiValueMap<String, String> buildSignedReturnUrlPayload(Long orderId, String tradeNo) {
+        return buildSignedReturnUrlPayload(orderId, tradeNo, taipeiNow());
+    }
+
+    /**
+     * Build a form payload with a specific PaymentDate. Used by the stale-
+     * callback test to construct a payload outside the replay window.
+     */
+    private static MultiValueMap<String, String> buildSignedReturnUrlPayload(Long orderId, String tradeNo, String paymentDate) {
         Map<String, String> params = new LinkedHashMap<>();
         params.put("MerchantID",      MERCHANT_ID);
         params.put("MerchantTradeNo", "FS" + String.format("%018d", orderId));
@@ -209,10 +258,10 @@ class EcpayWebhookIdempotencyTest {
         params.put("RtnMsg",          "Trade Succeeded");
         params.put("TradeNo",         tradeNo);
         params.put("TradeAmt",        "1000");
-        params.put("PaymentDate",     "2026/06/05 10:30:00");
+        params.put("PaymentDate",     paymentDate);
         params.put("PaymentType",     "Credit_CreditCard");
         params.put("PaymentTypeChargeFee", "0");
-        params.put("TradeDate",       "2026/06/05 10:29:00");
+        params.put("TradeDate",       paymentDate);
         params.put("SimulatePaid",    "0");
 
         String checkMac = EcpayCheckMac.compute(params, HASH_KEY, HASH_IV);
@@ -221,5 +270,17 @@ class EcpayWebhookIdempotencyTest {
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
         params.forEach(form::add);
         return form;
+    }
+
+    private static final java.time.format.DateTimeFormatter ECPAY_FMT =
+            java.time.format.DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss");
+    private static final java.time.ZoneId ECPAY_ZONE = java.time.ZoneId.of("Asia/Taipei");
+
+    private static String taipeiNow() {
+        return java.time.LocalDateTime.now(ECPAY_ZONE).format(ECPAY_FMT);
+    }
+
+    private static String taipeiMinusSeconds(long seconds) {
+        return java.time.LocalDateTime.now(ECPAY_ZONE).minusSeconds(seconds).format(ECPAY_FMT);
     }
 }

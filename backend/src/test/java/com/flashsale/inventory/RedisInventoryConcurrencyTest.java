@@ -58,6 +58,10 @@ class RedisInventoryConcurrencyTest {
     static void wireRedis(DynamicPropertyRegistry registry) {
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", redis::getFirstMappedPort);
+        // Opt this test out of Kafka — no broker container is wired here.
+        registry.add("spring.autoconfigure.exclude",
+                () -> "org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration");
+        registry.add("spring.kafka.bootstrap-servers", () -> "");
     }
 
     @Autowired InventoryService inventoryService;

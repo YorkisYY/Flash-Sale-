@@ -16,6 +16,10 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
 
     Optional<Order> findByPaymentIdempotencyKey(String key);
 
+    Optional<Order> findByExternalId(String externalId);
+
+    boolean existsByExternalId(String externalId);
+
     boolean existsByProductId(Long productId);
 
     @Query("""

@@ -5,13 +5,19 @@ import com.flashsale.payment.PaymentProvider;
 import com.flashsale.payment.PaymentResult;
 import com.flashsale.payment.PaymentSession;
 import com.flashsale.payment.PaymentSignatureException;
+import com.flashsale.payment.StaleCallbackException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -56,11 +62,16 @@ public class EcpayProvider implements PaymentProvider {
     private static final Logger log = LoggerFactory.getLogger(EcpayProvider.class);
     private static final DateTimeFormatter TRADE_DATE_FMT =
             DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss", Locale.ROOT);
+    /** ECPay is a Taiwan gateway; PaymentDate / TradeDate are in Asia/Taipei. */
+    private static final ZoneId ECPAY_ZONE = ZoneId.of("Asia/Taipei");
 
     private final EcpayProperties props;
+    private final Duration replayWindow;
 
-    public EcpayProvider(EcpayProperties props) {
+    public EcpayProvider(EcpayProperties props,
+                         @Value("${flashsale.payment.replay-window-seconds:600}") long replayWindowSeconds) {
         this.props = props;
+        this.replayWindow = Duration.ofSeconds(replayWindowSeconds);
     }
 
     @Override
@@ -81,7 +92,11 @@ public class EcpayProvider implements PaymentProvider {
         params.put("PaymentType", "aio");
         params.put("TotalAmount", String.valueOf(order.getAmount().intValueExact()));
         params.put("TradeDesc", "FlashSaleOrder");
-        params.put("ItemName", "Flash Sale Order #" + order.getId());
+        // ItemName: NO '#' (ECPay treats it as multi-item separator) and NO
+        // spaces — both have shown up as the cause of CheckMacValue
+        // mismatches against the real stage server. Keep this restricted
+        // to ASCII letters + digits.
+        params.put("ItemName", "FlashSaleOrder" + order.getId());
         params.put("ReturnURL", props.getReturnUrl());
         params.put("OrderResultURL", props.getOrderResultUrl() + "/" + order.getId());
         params.put("ClientBackURL", props.getClientBackUrl());
@@ -108,6 +123,15 @@ public class EcpayProvider implements PaymentProvider {
             throw new PaymentSignatureException("ECPay CheckMacValue mismatch");
         }
 
+        // Replay-attack defence: signature verified, but if the payload
+        // timestamp is older than our configured window, this is most likely
+        // a captured-and-replayed legitimate callback. The PaymentEvent
+        // unique constraint already blocks identical-TradeNo duplicates;
+        // this catches the same-TradeNo (in case of TradeNo collision /
+        // reset) AND the "we want a tighter freshness window than the
+        // gateway provides" case.
+        rejectIfStale(payload);
+
         String rtnCode = payload.get("RtnCode");
         boolean success = "1".equals(rtnCode);
 
@@ -118,6 +142,47 @@ public class EcpayProvider implements PaymentProvider {
         log.info("ECPay callback verified: order={} tradeNo={} rtnCode={}",
                 orderId, tradeNo, rtnCode);
         return new PaymentResult(success, orderId, tradeNo, ACK_OK);
+    }
+
+    /**
+     * Reject if the payload's PaymentDate is older than the replay window.
+     * Prefer PaymentDate (when the payment was actually captured) over
+     * TradeDate (when the trade was initiated) — replay attacks substitute
+     * a captured success notification, so freshness of payment is what we
+     * care about.
+     *
+     * If PaymentDate is missing or unparseable (e.g. on some failed-payment
+     * callbacks), we don't enforce — better to let the request through to
+     * the downstream {@code applyResult} than to false-positive reject a
+     * weird-but-legitimate gateway message. {@code applyResult} won't change
+     * order state for non-success {@code RtnCode} anyway.
+     */
+    private void rejectIfStale(Map<String, String> payload) {
+        String paymentDateStr = payload.get("PaymentDate");
+        if (paymentDateStr == null || paymentDateStr.isBlank()) {
+            return; // gateway didn't include it — can't enforce, don't block
+        }
+        Instant paymentInstant;
+        try {
+            paymentInstant = LocalDateTime.parse(paymentDateStr, TRADE_DATE_FMT)
+                    .atZone(ECPAY_ZONE)
+                    .toInstant();
+        } catch (DateTimeParseException badFormat) {
+            log.warn("ECPay PaymentDate {} unparseable; skipping replay check: {}",
+                    paymentDateStr, badFormat.getMessage());
+            return;
+        }
+        Duration age = Duration.between(paymentInstant, Instant.now());
+        if (age.compareTo(replayWindow) > 0) {
+            // Don't throw PaymentSignatureException — signature WAS valid,
+            // and the controller's signature-failure response is 400, which
+            // would make ECPay retry the (still-stale) message endlessly.
+            // StaleCallbackException is caught separately and produces a
+            // 200 ack so the gateway stops trying.
+            throw new StaleCallbackException(
+                    "PaymentDate=" + paymentDateStr + " is " + age.toSeconds()
+                            + "s old (window " + replayWindow.toSeconds() + "s) — replay rejected");
+        }
     }
 
     static String buildMerchantTradeNo(long orderId) {

@@ -28,8 +28,21 @@ frontend/.vercel
 # Loadtest
 loadtest/node_modules/
 
-# Local logs
-stripe-listen.log
+# Local logs — anything *.log at the repo root is a local-dev artifact
+# (cloudflared-tunnel.log, stripe-listen.log, etc.)
+*.log
+
+# Local-dev scratch from manual ECPay sandbox runs (generated forms,
+# signed-callback payloads, curl arg files). Regeneratable from the
+# backend at any time; never load-bearing.
+ecpay-redirect.html
+ecpay-session.json
+_sess*.json
+*.args
+
+# Stand-alone ECPay-callback signing tool — public stage HashKey/HashIV
+# in plaintext; useful for debugging but doesn't belong in git.
+SignEcpayCallback.java
 
 # Docker
 docker-compose.override.yml

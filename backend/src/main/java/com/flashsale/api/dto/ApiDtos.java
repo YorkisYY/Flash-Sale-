@@ -59,8 +59,14 @@ public final class ApiDtos {
             String formHtml
     ) {}
 
+    /**
+     * Public order representation. {@code id} is the UUID externalId — the
+     * internal Long DB id is intentionally NOT exposed. The result page polls
+     * by this id; any leak of the internal Long would re-introduce the
+     * {@code Long.parseLong("uuid")} NumberFormatException regression.
+     */
     public record OrderResponse(
-            Long id,
+            String id,
             Long productId,
             int quantity,
             String buyerName,
@@ -76,7 +82,7 @@ public final class ApiDtos {
     ) {
         public static OrderResponse of(Order o) {
             return new OrderResponse(
-                    o.getId(), o.getProductId(), o.getQuantity(),
+                    o.getExternalId(), o.getProductId(), o.getQuantity(),
                     o.getBuyerName(), o.getBuyerEmail(), o.getBuyerPhone(),
                     o.getShippingAddress(), o.getAmount(),
                     o.getStatus(), o.getProvider(), o.getProviderRef(),

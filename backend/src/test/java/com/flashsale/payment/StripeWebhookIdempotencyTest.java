@@ -64,7 +64,9 @@ class StripeWebhookIdempotencyTest {
     static void props(DynamicPropertyRegistry registry) {
         registry.add("spring.autoconfigure.exclude",
                 () -> "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration,"
-                    + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration");
+                    + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration,"
+                    + "org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration");
+        registry.add("spring.kafka.bootstrap-servers", () -> "");
         // Stripe API isn't actually called by verifyCallback — these stay placeholders.
         registry.add("flashsale.payment.stripe.secret-key",     () -> "sk_test_dummy");
         registry.add("flashsale.payment.stripe.webhook-secret", () -> WEBHOOK_SECRET);
@@ -176,6 +178,40 @@ class StripeWebhookIdempotencyTest {
         assertThat(untouched.getStatus()).isEqualTo(OrderStatus.CREATED);
     }
 
+    /**
+     * Replay protection delegated to the Stripe SDK: {@code Webhook.constructEvent}
+     * uses a default timestamp tolerance of 300 seconds. We sign an event
+     * with a timestamp 10 minutes in the past — the HMAC is correct (signed
+     * with the right secret over the right payload) but the SDK refuses to
+     * construct the event because t=<10min ago> is outside the tolerance
+     * window. The controller maps this to 400 INVALID_SIGNATURE just like
+     * any other SignatureVerificationException.
+     */
+    @Test
+    void staleTimestampIsRejectedBySdkTolerance() throws Exception {
+        Order order = seedOrder("STRIPE");
+        String eventId = "evt_test_stale_001";
+
+        String payload = """
+            {"id":"%s","object":"event","type":"checkout.session.completed",
+             "data":{"object":{"id":"cs_test_stale","object":"checkout.session",
+                               "metadata":{"orderId":"%d"}}},
+             "created":%d}""".formatted(eventId, order.getId(), Instant.now().getEpochSecond());
+
+        // 10 minutes old — outside the SDK's 300s default tolerance.
+        long staleTs = Instant.now().getEpochSecond() - 600;
+        String staleSig = stripeSignature(payload, WEBHOOK_SECRET, staleTs);
+
+        mockMvc.perform(post("/api/payments/stripe/callback")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("Stripe-Signature", staleSig)
+                        .content(payload))
+                .andExpect(status().isBadRequest());
+
+        Order untouched = orderRepository.findById(order.getId()).orElseThrow();
+        assertThat(untouched.getStatus()).isEqualTo(OrderStatus.CREATED);
+    }
+
     @Test
     void invalidSignatureIsRejected() throws Exception {
         Order order = seedOrder("STRIPE");
@@ -216,7 +252,11 @@ class StripeWebhookIdempotencyTest {
 
     /** Build a valid Stripe-Signature header value: t=<unix>,v1=<hmacSha256Hex>. */
     private static String stripeSignature(String payload, String secret) {
-        long ts = Instant.now().getEpochSecond();
+        return stripeSignature(payload, secret, Instant.now().getEpochSecond());
+    }
+
+    /** Same, but with a caller-controlled timestamp — used by the replay-protection test. */
+    private static String stripeSignature(String payload, String secret, long ts) {
         String signedPayload = ts + "." + payload;
         return "t=" + ts + ",v1=" + hmacSha256Hex(signedPayload, secret);
     }

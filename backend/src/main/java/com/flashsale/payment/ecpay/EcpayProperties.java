@@ -5,7 +5,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "flashsale.payment.ecpay")
 public class EcpayProperties {
 
-    /** Default 2000132 = ECPay's public test merchant. */
+    /** Default 3002607 = ECPay's currently-published stage test merchant. */
     private String merchantId;
 
     /** From ECPay merchant console (test). Env: ECPAY_HASH_KEY. */

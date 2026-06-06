@@ -26,6 +26,26 @@ spring:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
 
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+    consumer:
+      group-id: order-writer
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      properties:
+        spring.json.trusted.packages: com.flashsale.kafka
+        spring.json.value.default.type: com.flashsale.kafka.OrderRequestedEvent
+    listener:
+      ack-mode: manual
+
 server:
   port: ${SERVER_PORT:8080}
   error:
@@ -51,9 +71,13 @@ flashsale:
       success-url: ${STRIPE_SUCCESS_URL:http://localhost:3000/result}
       cancel-url: ${STRIPE_CANCEL_URL:http://localhost:3000/result}
     ecpay:
-      merchant-id: ${ECPAY_MERCHANT_ID:2000132}
-      hash-key:    ${ECPAY_HASH_KEY:pwFHCqoQZGmoCv08Q3XY}
-      hash-iv:     ${ECPAY_HASH_IV:EkRm7iFT760PKIKAKExC}
+      # Defaults are ECPay's currently-published stage test merchant
+      # (developers.ecpay.com.tw — CheckMacValue generation page). The
+      # earlier 2000132 / 20-char-key pair was rejected by the stage server
+      # with 10200073; don't put it back without confirming end-to-end.
+      merchant-id: ${ECPAY_MERCHANT_ID:3002607}
+      hash-key:    ${ECPAY_HASH_KEY:pwFHCqoQZGmho4w6}
+      hash-iv:     ${ECPAY_HASH_IV:EkRm7iFT261dpevs}
       api-url:     ${ECPAY_API_URL:https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5}
       return-url:  ${ECPAY_RETURN_URL:http://localhost:8080/api/payments/ecpay/callback}
       order-result-url: ${ECPAY_ORDER_RESULT_URL:http://localhost:3000/result}

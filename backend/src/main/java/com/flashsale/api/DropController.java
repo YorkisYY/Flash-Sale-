@@ -3,16 +3,15 @@ package com.flashsale.api;
 import com.flashsale.api.dto.ApiDtos.OrderResponse;
 import com.flashsale.api.dto.ApiDtos.ProductResponse;
 import com.flashsale.api.dto.ApiDtos.PurchaseRequest;
-import com.flashsale.api.dto.ApiDtos.PurchaseResponse;
-import com.flashsale.domain.Order;
 import com.flashsale.domain.Product;
+import com.flashsale.inventory.InventoryService;
+import com.flashsale.order.DropNotOpenException;
+import com.flashsale.order.OrderIngestionService;
 import com.flashsale.order.OrderService;
-import com.flashsale.order.dto.CreateOrderCommand;
-import com.flashsale.payment.PaymentProvider;
-import com.flashsale.payment.PaymentProviderRegistry;
-import com.flashsale.payment.PaymentSession;
+import com.flashsale.order.SoldOutException;
 import com.flashsale.repository.ProductRepository;
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -22,7 +21,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
@@ -42,14 +43,17 @@ public class DropController {
 
     private final ProductRepository productRepository;
     private final OrderService orderService;
-    private final PaymentProviderRegistry providers;
+    private final InventoryService inventoryService;
+    private final OrderIngestionService ingestionService;
 
     public DropController(ProductRepository productRepository,
                           OrderService orderService,
-                          PaymentProviderRegistry providers) {
+                          InventoryService inventoryService,
+                          OrderIngestionService ingestionService) {
         this.productRepository = productRepository;
         this.orderService = orderService;
-        this.providers = providers;
+        this.inventoryService = inventoryService;
+        this.ingestionService = ingestionService;
     }
 
     /**
@@ -74,43 +78,64 @@ public class DropController {
         return ProductResponse.of(p);
     }
 
+    /**
+     * Hot path, async edition.
+     *
+     * <p>1. Rate-limit interceptor (registered separately) — rejected requests
+     *    never reach this method.
+     * <p>2. Validate product exists + drop is open.
+     * <p>3. Redis Lua DECR (no DB write yet). Sold out at this layer → 409.
+     * <p>4. Publish OrderRequestedEvent (partition key = productId for
+     *    per-product ordering).
+     * <p>5. Return 202 with the pre-generated externalId. Client polls
+     *    {@code GET /api/orders/{externalId}/status} until it leaves PROCESSING.
+     *
+     * <p>If the Kafka publish fails (broker unreachable inside the publish
+     * timeout), we compensate the Redis DECR before throwing — otherwise the
+     * buyer pool would leak one unit per failed publish.
+     */
     @PostMapping("/{productId}/purchase")
-    public ResponseEntity<PurchaseResponse> purchase(
+    public ResponseEntity<Map<String, Object>> purchase(
             @PathVariable Long productId,
             @RequestBody @Valid PurchaseRequest req) {
 
+        Product product = productRepository.findById(productId)
+                .orElseThrow(() -> new IllegalArgumentException("product not found: " + productId));
+        if (Instant.now().isBefore(product.getDropStartsAt())) {
+            throw new DropNotOpenException(product.getDropStartsAt());
+        }
+
         String providerName = (req.provider() == null || req.provider().isBlank())
                 ? DEFAULT_PROVIDER
-                : req.provider();
+                : req.provider().toUpperCase();
+        int quantity = req.quantity();
 
-        Order order = orderService.createOrder(new CreateOrderCommand(
-                productId,
-                req.quantity(),
-                req.buyerName(),
-                req.buyerEmail(),
-                req.buyerPhone(),
-                req.shippingAddress(),
-                providerName
-        ));
-
-        // Resolve the provider AFTER the order commits, so a misconfigured
-        // gateway can't leave a buyer in a half-state — the order exists and
-        // the result page can show "Awaiting payment" until the buyer retries.
-        PaymentProvider provider = providers.require(order.getProvider());
-
-        try {
-            PaymentSession session = provider.createSession(order);
-            return ResponseEntity.ok(new PurchaseResponse(
-                    order.getId(), session.redirectUrl(), session.formHtml()));
-        } catch (UnsupportedOperationException notImplemented) {
-            // PayUni currently throws this; surface the order id so the buyer
-            // still sees a result page rather than a hard 500.
-            return ResponseEntity.ok(new PurchaseResponse(order.getId(), null, null));
+        // Redis Lua DECR — the peak-shave layer. Most sold-out requests die here.
+        if (!inventoryService.tryReserveRedisOnly(productId, quantity)) {
+            throw new SoldOutException(productId);
         }
+
+        // Publish to Kafka. On failure, refund Redis so the buyer pool isn't
+        // permanently leaked.
+        String externalId;
+        try {
+            externalId = ingestionService.publishRequest(
+                    productId, quantity,
+                    req.buyerName(), req.buyerEmail(), req.buyerPhone(),
+                    req.shippingAddress(), providerName);
+        } catch (RuntimeException publishFailed) {
+            inventoryService.releaseRedisOnly(productId, quantity);
+            throw publishFailed;
+        }
+
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of(
+                "orderId", externalId,
+                "status", "PROCESSING"
+        ));
     }
 
-    @GetMapping("/orders/{orderId}")
-    public OrderResponse getOrderUnderDrops(@PathVariable Long orderId) {
-        return OrderResponse.of(orderService.requireOrder(orderId));
+    @GetMapping("/orders/{externalId}")
+    public OrderResponse getOrderUnderDrops(@PathVariable String externalId) {
+        return OrderResponse.of(orderService.requireOrderByExternalId(externalId));
     }
 }

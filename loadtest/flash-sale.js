@@ -96,17 +96,44 @@ export default function () {
     provider: PROVIDER,
   });
 
+  // ---- Per-VU client IP (X-Forwarded-For) -------------------------------
+  // The purchase endpoint has a per-buyer rate limiter keyed on
+  //   (clientIp, productId), default 10 attempts / 60s.
+  // Without distinct client identities, every k6 VU comes from localhost —
+  // they'd all share one budget and the test would degenerate into mostly
+  // 429s instead of measuring stock contention.
+  //
+  // The limiter ignores X-Forwarded-For by default (production-secure: any
+  // attacker could otherwise burn fresh buckets with random XFF values).
+  // To make this header take effect during a load test you must ALSO set
+  //   flashsale.ratelimit.trust-forwarded-header=true
+  // on the backend (env var FLASHSALE_RATELIMIT_TRUST-FORWARDED-HEADER=true)
+  // before docker compose up.
+  //
+  // Alternatives if you want to keep the production default (flag=false):
+  //   (a) Bump flashsale.ratelimit.max-attempts to something huge for the
+  //       run, e.g. -e FLASHSALE_RATELIMIT_MAX-ATTEMPTS=1000000.
+  //   (b) Run k6 from multiple source machines (real IPs differ).
   const res = http.post(
     `${BASE_URL}/drops/${PRODUCT_ID}/purchase`,
     body,
-    { headers: { 'Content-Type': 'application/json' }, tags: { name: 'purchase' } },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': `10.${(__VU >> 16) & 0xff}.${(__VU >> 8) & 0xff}.${__VU & 0xff}`,
+      },
+      tags: { name: 'purchase' },
+    },
   );
 
 
-  if (res.status === 200) {
+  // Post-Kafka architecture: 202 = published to the async pipeline; the order
+  // is created by the consumer at its own pace. Pre-Kafka: 200 = sync DB write.
+  // Both shapes count as "admitted by the system" for no-oversell accounting.
+  if (res.status === 200 || res.status === 202) {
     purchased.add(1);
     status2xx.add(1);
-    check(res, { 'purchase 200 has orderId': (r) => !!r.json('orderId') });
+    check(res, { 'success has orderId': (r) => !!r.json('orderId') });
   } else if (res.status === 409) {
     soldOut.add(1);
     status4xx.add(1);
@@ -147,11 +174,16 @@ export function handleSummary(data) {
   http_req_failed      : ${failedRate}%
   http_req_duration    : avg=${avg}ms  p95=${p95}ms  p99=${p99}ms
   -----------------------------------------------
-  successful purchases : ${successes}
+  admitted (200 or 202): ${successes}
   sold-out responses   : ${sold}
   errors (5xx / 0 / etc): ${errored}
   -----------------------------------------------
   overselling check    : ${verdict}
+
+  Note (Kafka pipeline): the 202 count above is "events published to Kafka",
+  not "orders persisted." Run the post-k6 drain probe (see loadtest README)
+  to measure time-to-drain — the consumer typically writes all admitted
+  orders within a few seconds of k6 finishing.
 ================================================
 `;
   // eslint-disable-next-line no-console

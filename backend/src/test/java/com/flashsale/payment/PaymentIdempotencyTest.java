@@ -49,7 +49,9 @@ class PaymentIdempotencyTest {
     static void disableRedisAutoconfig(DynamicPropertyRegistry registry) {
         registry.add("spring.autoconfigure.exclude",
                 () -> "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration,"
-                    + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration");
+                    + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration,"
+                    + "org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration");
+        registry.add("spring.kafka.bootstrap-servers", () -> "");
     }
 
     @Autowired private ProductRepository productRepository;

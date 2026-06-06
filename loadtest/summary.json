@@ -1,17 +1,17 @@
 {
-  "productId": "9",
+  "productId": "11",
   "productStock": 100,
   "provider": "ECPAY",
-  "totalReqs": 648348,
+  "totalReqs": 180885,
   "vusMax": 500,
-  "failedRatePct": 99.98,
+  "failedRatePct": 99.94,
   "latencyMs": {
-    "avg": 61.5,
-    "p95": 143.4,
+    "avg": 220.5,
+    "p95": 345.3,
     "p99": 0
   },
   "successes": 100,
-  "soldOut": 648248,
+  "soldOut": 180785,
   "errored": 0,
   "oversold": false
 }
