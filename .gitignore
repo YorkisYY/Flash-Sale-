@@ -47,5 +47,11 @@ SignEcpayCallback.java
 # Docker
 docker-compose.override.yml
 
+# Kubernetes secrets — the committed k8s/secret.yaml holds REPLACE_ME
+# placeholders ONLY. Real values go in a *.local.yaml copy that must never
+# be committed (see k8s/README.md).
+k8s/secret.local.yaml
+k8s/*.local.yaml
+
 # OS
 Thumbs.db

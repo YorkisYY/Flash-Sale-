@@ -1,0 +1,30 @@
+# Horizontal Pod Autoscaler for the backend.
+#
+# min 2 / max 4, target 70% CPU. Documents scaling INTENT — on a laptop the
+# demo load won't push CPU past 70%, so it will simply hold at the minimum of
+# 2 replicas. Requires metrics-server (k3d/k3s bundles it); the backend sets
+# CPU requests (250m) so utilization can be computed.
+#
+# Scaling out is safe: ShedLock keeps the @Scheduled jobs single-execution
+# regardless of replica count.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend
+  labels:
+    app: flashsale-backend
+    app.kubernetes.io/part-of: flashsale
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

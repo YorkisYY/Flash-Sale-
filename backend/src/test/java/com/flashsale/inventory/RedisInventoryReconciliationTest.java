@@ -64,8 +64,13 @@ class RedisInventoryReconciliationTest {
         registry.add("spring.data.redis.port", redis::getFirstMappedPort);
         // Push scheduled tasks 10 minutes out so they don't tick during the
         // test window. Each test invokes the action it cares about directly.
+        // The initial-delay knobs suppress the startup auto-fire too —
+        // otherwise the startup sweep/reconcile would grab the ShedLock lock
+        // and the explicit call below would be locked out.
         registry.add("flashsale.order.expiry-scan-interval-ms",        () -> "600000");
         registry.add("flashsale.inventory.reconcile-interval-ms",      () -> "600000");
+        registry.add("flashsale.order.expiry-initial-delay-ms",        () -> "600000");
+        registry.add("flashsale.inventory.reconcile-initial-delay-ms", () -> "600000");
         registry.add("spring.autoconfigure.exclude",
                 () -> "org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration");
         registry.add("spring.kafka.bootstrap-servers", () -> "");

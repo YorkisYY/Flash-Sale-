@@ -3,6 +3,7 @@ package com.flashsale.inventory;
 import com.flashsale.domain.Product;
 import com.flashsale.domain.ProductStatus;
 import com.flashsale.repository.ProductRepository;
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -12,7 +13,6 @@ import org.springframework.context.event.EventListener;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -252,8 +252,9 @@ public class RedisInventoryService implements InventoryService {
      *     {@link #tryReserve} only fires on the first reservation per product
      *   - Manual DB edits or restored Postgres snapshots
      *
-     * Wired to run every {@code flashsale.inventory.reconcile-interval-ms}
-     * (default 60s) in addition to the one-shot reload on application startup.
+     * Driven every {@code flashsale.inventory.reconcile-interval-ms} (default
+     * 60s) by {@link com.flashsale.config.SchedulerTriggers} on the scheduler
+     * instance, in addition to the one-shot reload on application startup.
      *
      * Race note: {@code available_stock} can change between the SELECT and the
      * Redis SET, so this method may briefly write a 1-2 unit stale value under
@@ -264,7 +265,11 @@ public class RedisInventoryService implements InventoryService {
      * so a dashboard can alert on a non-zero correction count.
      */
     @Override
-    @Scheduled(fixedDelayString = "${flashsale.inventory.reconcile-interval-ms:60000}")
+    // The timer lives in SchedulerTriggers (only the replicas=1 scheduler
+    // Deployment registers it), so single-execution is structural.
+    // @SchedulerLock stays as defense-in-depth for the brief scheduler
+    // rolling-update overlap; lockAtLeastFor back to a small 5s.
+    @SchedulerLock(name = "inventoryReconcile", lockAtMostFor = "55s", lockAtLeastFor = "5s")
     public void reconcile() {
         if (redis == null) return;
         int total = 0;

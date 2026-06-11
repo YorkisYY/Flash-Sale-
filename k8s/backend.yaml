@@ -1,0 +1,93 @@
+# Backend — Spring Boot API, horizontally scaled to 2 replicas.
+# Serves traffic only. SCHEDULER_ENABLED=false → these pods register NO
+# @Scheduled timers (SchedulerTriggers bean is not created), so scaling them
+# never duplicates the periodic jobs. The periodic jobs run on the separate
+# scheduler Deployment (scheduler.yaml, replicas=1). See k8s/README.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: flashsale-backend
+    app.kubernetes.io/part-of: flashsale
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: flashsale-backend
+  template:
+    metadata:
+      labels:
+        app: flashsale-backend
+        app.kubernetes.io/part-of: flashsale
+    spec:
+      containers:
+        - name: backend
+          image: flashsale-backend:local
+          imagePullPolicy: IfNotPresent     # use the image imported into k3d, not a registry
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: flashsale-config       # non-sensitive: addresses, pool size, URLs, knobs
+            - secretRef:
+                name: flashsale-secrets      # sensitive: DB password, payment keys
+          env:
+            # Traffic-serving pods do NOT run the periodic jobs — only the
+            # scheduler Deployment does. This is what makes replicas=2 safe.
+            - name: SCHEDULER_ENABLED
+              value: "false"
+            # Let the JVM use most of the 1Gi container limit for heap.
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:MaxRAMPercentage=70.0"
+          # startupProbe absorbs the cold-boot window (JVM + Flyway + Kafka
+          # admin) so a slow start never trips liveness. Up to 5s*30 = 150s.
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 30
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 2
+          # Readiness reflects DB health (the readiness group includes `db`).
+          # failureThreshold 3 * periodSeconds 10 = ~30s of DB unreachability
+          # before a pod is pulled from the Service — deliberately tolerant so a
+          # brief DB blip does NOT flap pods out of rotation. Redis/Kafka are
+          # NOT in the readiness group, so their outages never affect readiness.
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels:
+    app: flashsale-backend
+    app.kubernetes.io/part-of: flashsale
+spec:
+  type: ClusterIP
+  selector:
+    app: flashsale-backend
+  ports:
+    - port: 8080
+      targetPort: 8080

@@ -1,0 +1,84 @@
+# Postgres — lightweight single-replica Deployment for a local/demo cluster.
+# NOT a production StatefulSet: data lives in an emptyDir and is lost when the
+# pod is rescheduled. That is acceptable for the k3d correctness demo.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: flashsale
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single emptyDir writer; never run two at once
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        app.kubernetes.io/part-of: flashsale
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          # max_connections sized for the cluster's connection budget:
+          # 2 backend replicas * HikariCP pool 8 = 16, plus Flyway/actuator
+          # headroom, all well under 100. See k8s/README.md.
+          args: ["-c", "max_connections=100"]
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: flashsale
+            - name: POSTGRES_USER
+              value: flashsale
+            - name: POSTGRES_PASSWORD     # shared key — same value the backend uses
+              valueFrom:
+                secretKeyRef:
+                  name: flashsale-secrets
+                  key: DB_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "flashsale", "-d", "flashsale"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "flashsale", "-d", "flashsale"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: flashsale
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

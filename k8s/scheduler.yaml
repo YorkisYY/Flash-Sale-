@@ -1,0 +1,79 @@
+# Scheduler — the SAME backend image, run as a dedicated single instance that
+# owns the periodic jobs (order-expiry sweep + Redis↔DB reconcile).
+#
+# replicas: 1 + SCHEDULER_ENABLED=true means exactly one process registers the
+# @Scheduled timers, so single-execution is STRUCTURAL — it does not depend on
+# ShedLock lock-timing. ShedLock remains as defense-in-depth for the brief
+# window during a rolling update when an old and new scheduler pod overlap.
+#
+# No Service: it serves no traffic (the backend Deployment fronts the API). It
+# still runs the full app (web server + Kafka consumer), so it also helps drain
+# the orders.requested topic as an extra consumer-group member — harmless and
+# idempotent. Only a liveness probe is needed; readiness is irrelevant with no
+# Service routing to it.
+#
+# Single-point tradeoff: if this pod dies, the periodic jobs pause until
+# Kubernetes recreates it (seconds). That gap is safe — expiry just runs a bit
+# late (orders stay CREATED slightly longer) and reconcile drift is corrected on
+# the next pass. See k8s/README.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler
+  labels:
+    app: flashsale-scheduler
+    app.kubernetes.io/part-of: flashsale
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): avoid even the brief 2-pod overlap of a
+  # rolling update. ShedLock would cover that overlap anyway, but for a
+  # single-purpose timer process there's no availability benefit to overlapping.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flashsale-scheduler
+  template:
+    metadata:
+      labels:
+        app: flashsale-scheduler
+        app.kubernetes.io/part-of: flashsale
+    spec:
+      containers:
+        - name: scheduler
+          image: flashsale-backend:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080      # actuator/probe only; no Service fronts it
+          envFrom:
+            - configMapRef:
+                name: flashsale-config
+            - secretRef:
+                name: flashsale-secrets
+          env:
+            - name: SCHEDULER_ENABLED
+              value: "true"            # THIS instance owns the timers
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:MaxRAMPercentage=70.0"
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 30
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 2
+          # No readinessProbe: this pod takes no traffic (no Service).
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi

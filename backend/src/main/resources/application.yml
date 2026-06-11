@@ -6,7 +6,11 @@ spring:
     username: ${DB_USER:flashsale}
     password: ${DB_PASSWORD:flashsale}
     hikari:
-      maximum-pool-size: 30
+      # Env-overridable so each deployment can size the pool to its connection
+      # budget. Default 30 keeps local/docker-compose behaviour unchanged; the
+      # Kubernetes ConfigMap lowers it (DB_POOL_SIZE=8) so replicas*pool stays
+      # under Postgres max_connections — see k8s/README.md.
+      maximum-pool-size: ${DB_POOL_SIZE:30}
       minimum-idle: 5
   jpa:
     hibernate:
@@ -51,10 +55,56 @@ server:
   error:
     include-message: always
 
+# --- Actuator / Kubernetes probes ---
+# Liveness  -> /actuator/health/liveness   ("is the app process healthy?")
+# Readiness -> /actuator/health/readiness  ("should this pod receive traffic?")
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        # Force the liveness/readiness probe groups on in every environment
+        # (Spring only auto-enables them when it detects Kubernetes).
+        enabled: true
+      group:
+        liveness:
+          # Liveness deliberately contains ONLY livenessState — never a
+          # dependency. A failed liveness probe makes Kubernetes RESTART the
+          # pod, which cannot fix an external outage (DB/Redis/Kafka down) and
+          # would cause restart storms. Liveness fails only if the app itself
+          # is broken.
+          include: livenessState
+        readiness:
+          # Readiness gates traffic. Postgres is REQUIRED (source of truth +
+          # final oversell defense): if it is unreachable this pod cannot serve
+          # correctly, so `db` is in the group and the pod drops out of the
+          # Service endpoints until the DB returns.
+          #
+          # Redis and Kafka are deliberately EXCLUDED. The app degrades
+          # gracefully without them (DB-only inventory path; no-op Kafka
+          # publish), so an outage of either must NOT pull the pod from
+          # rotation — it can still serve in degraded mode. They still appear
+          # in the aggregate /actuator/health, just not in the readiness probe.
+          include: readinessState,db
+
 flashsale:
+  scheduler:
+    # When false, this instance registers NO @Scheduled timers — the
+    # SchedulerTriggers bean is not created. The dedicated scheduler Deployment
+    # runs with true (replicas=1, owns the timers); the traffic-serving backend
+    # Deployment runs with false. Default true preserves single-node /
+    # docker-compose behaviour.
+    enabled: ${SCHEDULER_ENABLED:true}
   order:
-    reservation-ttl-minutes: 15
-    expiry-scan-interval-ms: 60000
+    reservation-ttl-minutes: ${RESERVATION_TTL_MINUTES:15}
+    expiry-scan-interval-ms: ${EXPIRY_SCAN_INTERVAL_MS:60000}
+  inventory:
+    # Was previously only the @Scheduled annotation default; surfaced here so
+    # it is explicit and env-overridable via the ConfigMap.
+    reconcile-interval-ms: ${RECONCILE_INTERVAL_MS:60000}
   payment:
     payuni:
       merchant-id: ${PAYUNI_MERCHANT_ID:}

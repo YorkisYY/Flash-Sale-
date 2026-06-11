@@ -9,7 +9,7 @@ package com.flashsale.inventory;
  *   - {@link RedisInventoryService} (present when Redis is reachable, @Primary):
  *     atomic check-and-DECR in Redis via Lua, then delegates to the DB impl as
  *     final defense. Most sold-out responses come back here without ever touching
- *     Postgres, which is the "削峰" (peak shaving) layer.
+ *     Postgres, which is the peak-shaving layer.
  *
  * --- Concurrency strategy tradeoff (the core of this system) ---
  *

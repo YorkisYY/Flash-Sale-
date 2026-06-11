@@ -1,0 +1,33 @@
+# Ingress — single entrypoint that splits traffic:
+#   /api/*  -> backend Service  (8080)
+#   /*      -> frontend Service (3000)
+#
+# ingressClassName is `traefik`, the controller k3d/k3s bundle by default.
+# On a different cluster, change it to your controller's class (e.g. nginx).
+# Longest-prefix wins, so /api/... routes to the backend even though / also
+# matches the frontend rule.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: flashsale
+  labels:
+    app.kubernetes.io/part-of: flashsale
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000

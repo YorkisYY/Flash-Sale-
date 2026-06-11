@@ -1,0 +1,73 @@
+# Frontend — Next.js, single replica (stateless UI).
+#
+# NOTE on NEXT_PUBLIC_API_URL: Next.js bakes NEXT_PUBLIC_* at BUILD time, so
+# setting it here as a runtime env does NOT change the already-built bundle.
+# It is declared for documentation/parity; to actually point the browser at a
+# different API origin you must rebuild the image with that build-arg. For the
+# step-6 demo the purchase flow is verified at the API level (curl through the
+# Ingress), which does not depend on this value.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels:
+    app: flashsale-frontend
+    app.kubernetes.io/part-of: flashsale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flashsale-frontend
+  template:
+    metadata:
+      labels:
+        app: flashsale-frontend
+        app.kubernetes.io/part-of: flashsale
+    spec:
+      containers:
+        - name: frontend
+          image: flashsale-frontend:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: "http://localhost:8081/api"   # build-time baked; see note above
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  labels:
+    app: flashsale-frontend
+    app.kubernetes.io/part-of: flashsale
+spec:
+  type: ClusterIP
+  selector:
+    app: flashsale-frontend
+  ports:
+    - port: 3000
+      targetPort: 3000

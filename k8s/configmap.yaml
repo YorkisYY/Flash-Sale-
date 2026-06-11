@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flashsale-config
+  labels:
+    app.kubernetes.io/part-of: flashsale
+# Non-sensitive configuration only. Every key here maps to a ${ENV:default}
+# placeholder in the backend's application.yml (or to a relaxed-binding
+# @ConfigurationProperties name). Secrets live in secret.yaml, never here.
+data:
+  # --- Datasource (address only; password is in the Secret) ---
+  DB_HOST: "postgres"          # in-cluster Service name
+  DB_PORT: "5432"
+  DB_NAME: "flashsale"
+  DB_USER: "flashsale"
+  # Connection budget: 2 backend replicas * 8 = 16 < Postgres max_connections
+  # (100). See k8s/README.md "Connection math".
+  DB_POOL_SIZE: "8"
+
+  # --- Redis / Kafka (address only) ---
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  KAFKA_BROKERS: "kafka:9092"
+
+  # --- Server ---
+  SERVER_PORT: "8080"
+
+  # --- Rate limiting (relaxed-binding -> flashsale.ratelimit.*) ---
+  # Underscores, not hyphens: K8s env var names must be C identifiers, and
+  # Spring relaxed binding treats FLASHSALE_RATELIMIT_MAX_ATTEMPTS as
+  # flashsale.ratelimit.max-attempts.
+  FLASHSALE_RATELIMIT_MAX_ATTEMPTS: "10"
+  # Secure default: do NOT trust X-Forwarded-For. Behind this demo's Ingress
+  # every request appears to come from the ingress controller IP, so per-client
+  # limiting is coarse here. Flip to "true" ONLY behind a proxy you control that
+  # OVERWRITES X-Forwarded-For (see RateLimitProperties javadoc).
+  FLASHSALE_RATELIMIT_TRUST_FORWARDED_HEADER: "false"
+
+  # --- Order / inventory timing knobs ---
+  RESERVATION_TTL_MINUTES: "15"
+  EXPIRY_SCAN_INTERVAL_MS: "60000"
+  RECONCILE_INTERVAL_MS: "60000"
+
+  # --- Public / non-secret payment config (IDs, URLs, currency) ---
+  # Merchant IDs and endpoint URLs are public identifiers, not secrets.
+  # For this local demo the callback/result URLs are not exercised end-to-end
+  # (the step-6 check is an API-level purchase, not a real provider callback);
+  # in a real deploy these become the public Ingress domain.
+  STRIPE_CURRENCY: "twd"
+  STRIPE_SUCCESS_URL: "http://localhost:8081/result"
+  STRIPE_CANCEL_URL: "http://localhost:8081/result"
+  ECPAY_MERCHANT_ID: "3002607"
+  ECPAY_API_URL: "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5"
+  ECPAY_RETURN_URL: "http://localhost:8081/api/payments/ecpay/callback"
+  ECPAY_ORDER_RESULT_URL: "http://localhost:8081/result"
+  ECPAY_CLIENT_BACK_URL: "http://localhost:8081"
+  PAYUNI_MERCHANT_ID: ""
+  PAYUNI_ENV: "test"
+  PAYUNI_RETURN_URL: "http://localhost:8081/api/payments/payuni/callback"
+  PAYUNI_NOTIFY_URL: "http://localhost:8081/api/payments/payuni/callback"
+  PAYUNI_FRONTEND_RESULT_URL: "http://localhost:8081/result"

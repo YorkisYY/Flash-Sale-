@@ -7,7 +7,7 @@ The interesting parts: the atomic stock-decrement under concurrent load, the ord
 ## What's here / what isn't
 
 In scope:
-- Buyer drop page → 搶購 → guest checkout → PayUni payment → result page.
+- Buyer drop page → flash-buy → guest checkout → PayUni payment → result page.
 - Backend: concurrent stock decrement (no oversell), order state machine, idempotent webhook.
 - PayUni sandbox only (no real money).
 - Docker Compose deploy; k6 load test.
@@ -16,7 +16,7 @@ Out of scope (deliberately — keeps the surface small enough to verify):
 - Multi-tenant / multi-merchant.
 - Merchant dashboard / auth.
 - Buyer accounts / login (guest checkout only).
-- Real logistics (no 超商取貨 / 宅配 API). Just a shipping address + a manual SHIPPED flag flip.
+- Real logistics (no convenience-store pickup / home-delivery API). Just a shipping address + a manual SHIPPED flag flip.
 
 ## Stack
 
@@ -73,7 +73,7 @@ The response includes the product `id`. Use it in the URL below.
 
 ### 4. Open the buyer flow
 
-Visit [http://localhost:3000/drop/1](http://localhost:3000/drop/1) (replace `1` with the seeded id). Click 搶購 to start checkout.
+Visit [http://localhost:3000/drop/1](http://localhost:3000/drop/1) (replace `1` with the seeded id). Click flash-buy to start checkout.
 
 > **PayUni note:** until you paste PayUni's official test-environment docs and `PayUniProvider` is filled in (see [PayUni status](#payuni-status) below), the checkout submit creates the order + reserves stock, but no real PayUni redirect happens — the page falls through to the result view in a CREATED state. The rest of the flow (timeout/expiry, manual ship, callback dedup) is wired and testable.
 
@@ -369,7 +369,7 @@ cloudflared tunnel --url http://localhost:8080
 
 Then set `ECPAY_RETURN_URL` in `.env` to the public tunnel URL + `/api/payments/ecpay/callback` and restart the backend. `ECPAY_ORDER_RESULT_URL` (the browser-redirect destination) stays on `localhost:3000/result` since the buyer is browsing locally.
 
-> **The cloudflared quick-tunnel URL is ephemeral.** Every `cloudflared tunnel --url ...` invocation gets a fresh random `https://<words>.trycloudflare.com` subdomain. Whenever you restart the tunnel you MUST update `ECPAY_RETURN_URL` in `.env` (and recreate the backend container so it picks up the new env) — otherwise the stage server will be POSTing callbacks to a dead URL and you'll see ECPay's backend "通知失敗" without ever hitting your handler. For a stable URL, use a named cloudflared tunnel bound to your own subdomain.
+> **The cloudflared quick-tunnel URL is ephemeral.** Every `cloudflared tunnel --url ...` invocation gets a fresh random `https://<words>.trycloudflare.com` subdomain. Whenever you restart the tunnel you MUST update `ECPAY_RETURN_URL` in `.env` (and recreate the backend container so it picks up the new env) — otherwise the stage server will be POSTing callbacks to a dead URL and you'll see ECPay's backend report "notification failed" without ever hitting your handler. For a stable URL, use a named cloudflared tunnel bound to your own subdomain.
 
 > **ECPay stage test credentials.** The defaults in `.env` and `application.yml` (`MerchantID=3002607`, `HashKey=pwFHCqoQZGmho4w6`, `HashIV=EkRm7iFT261dpevs`) are ECPay's *currently-published* stage test set — see the [CheckMacValue generation page](https://developers.ecpay.com.tw/?p=2902). The older `2000132` / 20-char-key pair has been observed to fail with `10200073 CheckMacValue Error` against the live stage server even though the algorithm itself is correct ([`EcpayCheckMacGoldenSampleTest`](backend/src/test/java/com/flashsale/payment/EcpayCheckMacGoldenSampleTest.java) pins our compute against ECPay's own worked example). If ECPay rotates their published set again, refresh `.env` first and re-run that test.
 
